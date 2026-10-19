@@ -3,7 +3,7 @@ use std::error::Error;
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("PassQL error: {error}");
+        eprintln!("passql error: {error}");
         std::process::exit(1);
     }
 }
@@ -16,7 +16,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             let path = args.get(2).ok_or("Missing database path")?;
             let db = Storage::create(path)?;
 
-            println!("Created PassQL database: {path}");
+            println!("Created passql database: {path}");
             println!("Pages: {}", db.page_count());
         }
 

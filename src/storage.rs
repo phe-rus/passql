@@ -3,7 +3,7 @@ use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 pub const PAGE_SIZE: usize = 4096;
-const MAGIC: &[u8; 8] = b"PASSQL\0\0";
+const MAGIC: &[u8; 8] = b"passql\0\0";
 const FORMAT_VERSION: u32 = 1;
 const PAGE_COUNT_OFFSET: u64 = 16;
 
@@ -36,7 +36,7 @@ impl Storage {
         })
     }
 
-    /// Open an existing PassQL database.
+    /// Open an existing passql database.
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
 
@@ -46,7 +46,7 @@ impl Storage {
         if &header[0..8] != MAGIC {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
-                "Invalid PassQL database signature",
+                "Invalid passql database signature",
             ));
         }
 
@@ -57,7 +57,7 @@ impl Storage {
         if version != FORMAT_VERSION || page_size != PAGE_SIZE as u32 {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
-                "Unsupported PassQL database format",
+                "Unsupported passql database format",
             ));
         }
 
@@ -68,7 +68,7 @@ impl Storage {
         if page_count == 0 || file.metadata()?.len() < expected_length {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
-                "Truncated or invalid PassQL database",
+                "Truncated or invalid passql database",
             ));
         }
 
@@ -154,14 +154,14 @@ mod tests {
         {
             let mut db = Storage::create(&path)?;
             assert_eq!(db.page_count(), 1);
-            assert_eq!(db.append_page(b"Hello from PassQL")?, 1);
+            assert_eq!(db.append_page(b"Hello from passql")?, 1);
             assert_eq!(db.page_count(), 2);
         }
 
         {
             let mut db = Storage::open(&path)?;
             let page = db.read_page(1)?;
-            assert_eq!(&page[..17], b"Hello from PassQL");
+            assert_eq!(&page[..17], b"Hello from passql");
             assert_eq!(db.page_count(), 2);
         }
 

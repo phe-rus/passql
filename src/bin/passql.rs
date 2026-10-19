@@ -1,5 +1,5 @@
 use passql::storage_v3::StorageV3;
-use passql::{Record, Storage, VERSION};
+use passql::{DatabaseReader, Record, Storage, VERSION};
 use std::error::Error;
 
 fn main() {
@@ -73,6 +73,20 @@ fn run() -> Result<(), Box<dyn Error>> {
             println!("page size: {} bytes", passql::PAGE_SIZE);
         }
 
+        Some("verify") => {
+            let path = args.get(2).ok_or("missing database path")?;
+
+            let mut db = DatabaseReader::open(path)?;
+            let records = db.verify()?;
+
+            println!("passql integrity verification");
+            println!("database: {path}");
+            println!("generation: {}", db.generation());
+            println!("pages: {}", db.page_count());
+            println!("verified records: {records}");
+            println!("result: ok");
+        }
+
         Some("create3") => {
             let path = args.get(2).ok_or("missing database path")?;
             let db = StorageV3::create(path)?;
@@ -123,7 +137,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             let path = args.get(2).ok_or("missing database path")?;
             let key = args.get(3).ok_or("missing key")?;
 
-            let mut db = StorageV3::open(path)?;
+            let mut db = DatabaseReader::open(path)?;
 
             match db.lookup(key)? {
                 Some(value) => println!("{}", String::from_utf8(value)?),
@@ -133,7 +147,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 
         Some("info3") => {
             let path = args.get(2).ok_or("missing database path")?;
-            let db = StorageV3::open(path)?;
+            let db = DatabaseReader::open(path)?;
 
             println!("passql database: {path}");
             println!("format: 3");
@@ -151,6 +165,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             println!("  passql set    <file.psl> <key> <value>");
             println!("  passql lookup <file.psl> <key>");
             println!("  passql info   <file.psl>");
+            println!("  passql verify <file.psl>");
             println!("\nexperimental format v3:");
             println!("  passql create3 <file.psl>");
             println!("  passql set3 <file.psl> <key> <value>");

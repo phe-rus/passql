@@ -19,7 +19,7 @@ fn validate_key(key: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn encode(key: &str, value: &[u8]) -> io::Result<Record> {
+pub(crate) fn encode(key: &str, value: &[u8]) -> io::Result<Record> {
     validate_key(key)?;
 
     if HEADER_SIZE + key.len() + value.len() > MAX_RECORD_SIZE {
@@ -40,7 +40,7 @@ fn encode(key: &str, value: &[u8]) -> io::Result<Record> {
     Ok(Record::new(data))
 }
 
-fn decode(data: &[u8]) -> io::Result<Option<(&[u8], &[u8])>> {
+pub(crate) fn decode(data: &[u8]) -> io::Result<Option<(&[u8], &[u8])>> {
     if !data.starts_with(MAGIC) {
         return Ok(None);
     }

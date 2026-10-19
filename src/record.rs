@@ -33,7 +33,7 @@ impl Record {
     }
 
     pub fn decode(page: &[u8; PAGE_SIZE]) -> io::Result<Self> {
-        if page[0] != RECORD_TYPE {
+        if !Self::is_record_page(page) {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
                 "Unsupported record page type",
@@ -61,6 +61,10 @@ impl Record {
         }
 
         Ok(Self::new(data.to_vec()))
+    }
+
+    pub(crate) fn is_record_page(page: &[u8; PAGE_SIZE]) -> bool {
+        page[0] == RECORD_TYPE
     }
 }
 

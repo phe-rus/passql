@@ -1,5 +1,6 @@
 use passql::storage_v3::StorageV3;
-use passql::{DatabaseReader, Record, Storage, VERSION};
+use passql::{DatabaseInfo, DatabaseReader, Record, Storage, VERSION, format};
+use passql::{IndexReaderV4, StorageV4};
 use std::error::Error;
 
 fn main() {
@@ -66,25 +67,25 @@ fn run() -> Result<(), Box<dyn Error>> {
 
         Some("info") => {
             let path = args.get(2).ok_or("missing database path")?;
-            let db = Storage::open(path)?;
-
-            println!("passql database: {path}");
-            println!("pages: {}", db.page_count());
-            println!("page size: {} bytes", passql::PAGE_SIZE);
+            print_info(path, format::inspect(path)?);
         }
 
         Some("verify") => {
             let path = args.get(2).ok_or("missing database path")?;
-
-            let mut db = DatabaseReader::open(path)?;
-            let records = db.verify()?;
+            let report = format::verify(path)?;
 
             println!("passql integrity verification");
             println!("database: {path}");
-            println!("generation: {}", db.generation());
-            println!("pages: {}", db.page_count());
-            println!("verified records: {records}");
-            println!("result: ok");
+            print_info(path, report.info);
+            println!("scanned pages: {}", report.pages_scanned);
+            println!("verified records: {}", report.records_verified);
+            if report.pages_without_record_checksum > 0 {
+                println!(
+                    "pages without record checksums: {}",
+                    report.pages_without_record_checksum
+                );
+            }
+            println!("result: structural checks passed");
         }
 
         Some("create3") => {
@@ -155,6 +156,75 @@ fn run() -> Result<(), Box<dyn Error>> {
             println!("pages: {}", db.page_count());
         }
 
+        Some("create4") => {
+            let path = args.get(2).ok_or("missing database path")?;
+            let db = StorageV4::create(path)?;
+            println!("created: {path}");
+            print_info(path, db.info());
+        }
+
+        Some("set4") => {
+            let path = args.get(2).ok_or("missing database path")?;
+            let key = args.get(3).ok_or("missing key")?;
+            let value = args.get(4).ok_or("missing value")?;
+            let mut db = StorageV4::open(path)?;
+            db.set(key, value.as_bytes())?;
+            println!("committed: {key}");
+            println!("generation: {}", db.generation());
+        }
+
+        Some("batch4") => {
+            let path = args.get(2).ok_or("missing database path")?;
+            let entries = &args[3..];
+            if entries.is_empty() || !entries.len().is_multiple_of(2) {
+                return Err("expected key/value pairs: batch4 <file.psl> <key> <value> ...".into());
+            }
+
+            let mut db = StorageV4::open(path)?;
+            let mut transaction = db.begin()?;
+            for pair in entries.chunks_exact(2) {
+                transaction.set(&pair[0], pair[1].as_bytes())?;
+            }
+            let count = transaction.pending();
+            let generation = transaction.commit()?;
+            println!("committed {count} distinct keys");
+            println!("generation: {generation}");
+        }
+
+        Some("lookup4") => {
+            let path = args.get(2).ok_or("missing database path")?;
+            let key = args.get(3).ok_or("missing key")?;
+            let mut db = IndexReaderV4::open(path)?;
+            match db.get(key)? {
+                Some(value) => println!("{}", String::from_utf8(value)?),
+                None => println!("key not found: {key}"),
+            }
+        }
+
+        Some("delete4") => {
+            let path = args.get(2).ok_or("missing database path")?;
+            let key = args.get(3).ok_or("missing key")?;
+            let mut db = StorageV4::open(path)?;
+            let previous_generation = db.generation();
+            let generation = db.delete(key)?;
+            if generation == previous_generation {
+                println!("key not found: {key}");
+            } else {
+                println!("deleted: {key}");
+                println!("generation: {generation}");
+            }
+        }
+
+        Some("range4") => {
+            let path = args.get(2).ok_or("missing database path")?;
+            let start = args.get(3).map(String::as_str);
+            let end = args.get(4).map(String::as_str);
+            let mut db = IndexReaderV4::open(path)?;
+            for (key, value) in db.range(start, end)? {
+                println!("{key}\t{}", String::from_utf8(value)?);
+            }
+        }
+
         _ => {
             println!("Passql v{VERSION}");
             println!("embedded database engine\n");
@@ -172,8 +242,25 @@ fn run() -> Result<(), Box<dyn Error>> {
             println!("  passql batch3 <file.psl> <key> <value> ...");
             println!("  passql lookup3 <file.psl> <key>");
             println!("  passql info3 <file.psl>");
+            println!("\nversion 4 persistent index:");
+            println!("  passql create4 <file.psl>");
+            println!("  passql set4 <file.psl> <key> <value>");
+            println!("  passql batch4 <file.psl> <key> <value> ...");
+            println!("  passql lookup4 <file.psl> <key>");
+            println!("  passql delete4 <file.psl> <key>");
+            println!("  passql range4 <file.psl> [start] [end]");
         }
     }
 
     Ok(())
+}
+
+fn print_info(path: &str, info: DatabaseInfo) {
+    println!("passql database: {path}");
+    println!("format: {}", info.format.version());
+    println!("pages: {}", info.page_count);
+    println!("page size: {} bytes", info.page_size);
+    if let Some(generation) = info.generation {
+        println!("generation: {generation}");
+    }
 }

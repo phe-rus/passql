@@ -4,6 +4,7 @@
 pub mod kv;
 pub mod record;
 pub mod storage;
+pub mod transaction;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

@@ -2,5 +2,16 @@
 name = "passql"
 version = "0.1.0"
 edition = "2024"
+description = "Embedded, edge-native database engine for Rust"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
+sqlparser = "0.53"
+
+[lib]
+name = "passql"
+path = "src/lib.rs"
+
+[[bin]]
+name = "passql"
+path = "src/bin/passql.rs"

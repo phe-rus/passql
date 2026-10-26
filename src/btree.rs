@@ -1,5 +1,11 @@
-use crate::storage::PAGE_SIZE;
 use std::io::{self, ErrorKind};
+
+/// Page size used by every Passql on-disk format.
+///
+/// 4096 bytes aligns with most filesystem block sizes, balances IO
+/// amplification against metadata overhead, and matches what SQLite, LMDB,
+/// and most modern engines use.
+pub const PAGE_SIZE: usize = 4096;
 
 const PAGE_MAGIC: &[u8; 4] = b"PSL4";
 const PAGE_HEADER_SIZE: usize = 16;

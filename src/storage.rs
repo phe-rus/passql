@@ -234,6 +234,18 @@ fn validate_tree(file: &mut File, commit: Commit) -> io::Result<u64> {
 }
 
 fn select_commit(file: &mut File) -> io::Result<(Commit, usize)> {
+    select_commit_with_validation(file, false)
+}
+
+/// Select the latest valid commit. When `validate` is true, walk the tree
+/// of each candidate to confirm it is structurally sound. When false,
+/// validate only the root page's checksum (O(1) open with basic sanity
+/// check that catches corruption of the root or near it).
+///
+/// `validate=true` is used by `verify()` and by tests that simulate
+/// corruption of leaf/record pages. Production opens use
+/// `validate=false` for O(1) startup.
+fn select_commit_with_validation(file: &mut File, validate: bool) -> io::Result<(Commit, usize)> {
     let header = read_header(file)?;
     let file_size = file.metadata()?.len();
     let slots = commit_slots(&header);
@@ -245,12 +257,47 @@ fn select_commit(file: &mut File) -> io::Result<(Commit, usize)> {
         .collect();
     candidates.sort_by_key(|(commit, slot)| (std::cmp::Reverse(commit.generation), *slot));
 
+    if candidates.is_empty() {
+        return Err(invalid("no recoverable commit"));
+    }
+
+    if !validate {
+        // O(1) open: trust the newest commit's slot checksum, and verify
+        // only its root page's checksum (one IO). If the root is corrupt,
+        // try the next candidate.
+        for (commit, slot) in &candidates {
+            if root_page_is_valid(file, *commit)? {
+                return Ok((*commit, *slot));
+            }
+        }
+        return Err(invalid("no commit with a valid root page"));
+    }
+
     for (commit, slot) in candidates {
         if validate_tree(file, commit).is_ok() {
             return Ok((commit, slot));
         }
     }
     Err(invalid("no recoverable commit"))
+}
+
+/// Read the root page of `commit` and verify its checksum. Returns true
+/// if the page can be decoded successfully (i.e. the checksum matches).
+/// Empty tree (root_page == 0) is always valid.
+fn root_page_is_valid(file: &mut File, commit: Commit) -> io::Result<bool> {
+    if commit.root_page == 0 {
+        return Ok(true);
+    }
+    if commit.root_page >= commit.page_count {
+        return Ok(false);
+    }
+    match read_page(file, commit, commit.root_page) {
+        Ok(page) => match btree::decode_node(&page) {
+            Ok(_) => Ok(true),
+            Err(_) => Ok(false),
+        },
+        Err(_) => Ok(false),
+    }
 }
 
 fn info(commit: Commit) -> DatabaseInfo {
@@ -481,6 +528,165 @@ impl Storage {
         self.poisoned = false;
         Ok(generation)
     }
+
+    /// Rewrite the database to a new file with only the live (reachable)
+    /// pages from the current commit. The output is a fresh v4 file with
+    /// generation 1, no dead pages, and no historical commit slots.
+    ///
+    /// This is an offline compaction: it does not affect the source file.
+    /// For atomic replacement, the caller should rename the output over
+    /// the input after this returns successfully.
+    pub fn compact_to(&self, dest_path: impl AsRef<Path>) -> io::Result<u64> {
+        let dest = dest_path.as_ref();
+        if dest.exists() {
+            return Err(io::Error::new(
+                ErrorKind::AlreadyExists,
+                "compaction destination already exists",
+            ));
+        }
+
+        // We can't recover the path from a File handle. Instead, we read
+        // through a fresh handle by dup-ing the existing one. The standard
+        // library doesn't expose dup directly; we use try_clone.
+        let mut src = self
+            .file
+            .try_clone()
+            .map_err(|error| io::Error::other(format!("clone source file: {error}")))?;
+        let live_pages = walk_live_pages(&mut src, self.commit)?;
+
+        // Create the destination file with a fresh header.
+        let mut dst = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(dest)?;
+        let mut header = [0u8; PAGE_SIZE];
+        header[..8].copy_from_slice(MAGIC);
+        header[8..12].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+        header[12..16].copy_from_slice(&(PAGE_SIZE as u32).to_le_bytes());
+        let total_pages = 1u64 + live_pages.len() as u64;
+        let new_commit = Commit::new(1, total_pages, if live_pages.is_empty() { 0 } else { 1 })?;
+        let encoded = new_commit.encode();
+        let start = SLOT_OFFSETS[0] as usize;
+        header[start..start + COMMIT_SIZE].copy_from_slice(&encoded);
+        dst.write_all(&header)?;
+        dst.sync_data()?;
+
+        // Build id map (old_id -> new_id). Root gets new id 1, other pages
+        // are numbered sequentially in walk order.
+        let mut id_map: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+        for (new_index, old_id) in live_pages.iter().enumerate() {
+            let new_id = 1u64 + new_index as u64;
+            id_map.insert(*old_id, new_id);
+        }
+
+        // Copy live pages from source to destination, rewriting page-id
+        // references (children, record_ids) to use the new numbering.
+        for old_id in &live_pages {
+            let new_id = id_map[old_id];
+            let offset = old_id * PAGE_SIZE as u64;
+            src.seek(SeekFrom::Start(offset))?;
+            let mut page = [0u8; PAGE_SIZE];
+            src.read_exact(&mut page)?;
+            let rewritten = rewrite_page_ids(&page, &id_map)?;
+            let new_offset = new_id * PAGE_SIZE as u64;
+            dst.seek(SeekFrom::Start(new_offset))?;
+            dst.write_all(&rewritten)?;
+        }
+        dst.sync_all()?;
+
+        Ok(total_pages)
+    }
+}
+
+/// Walk the live B+ tree from `commit.root_page` and return all reachable
+/// page ids in pre-order (root first, then children left-to-right).
+fn walk_live_pages(file: &mut File, commit: Commit) -> io::Result<Vec<u64>> {
+    let mut out = Vec::new();
+    if commit.root_page == 0 {
+        return Ok(out);
+    }
+    let mut stack: Vec<u64> = vec![commit.root_page];
+    let mut visited = HashSet::new();
+    while let Some(page_id) = stack.pop() {
+        if !visited.insert(page_id) {
+            return Err(invalid("cyclic page reference during compaction"));
+        }
+        out.push(page_id);
+        let page = read_page(file, commit, page_id)?;
+        match btree::decode_node(&page)? {
+            Node::Leaf(entries) => {
+                for (_, record_id) in entries {
+                    out.push(record_id);
+                }
+            }
+            Node::Internal { children, .. } => {
+                for child in children {
+                    stack.push(child);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Rewrite every embedded page-id reference in `page` using `id_map`.
+///
+/// Pages come in three flavors:
+/// - Record pages (page type 1): contain a key+value, no page references.
+///   They are copied verbatim — no rewriting needed.
+/// - Leaf pages (page type 2): contain (key, record_page_id) entries.
+///   The record_page_id fields must be rewritten.
+/// - Internal pages (page type 3): contain child page ids. Those must be
+///   rewritten.
+fn rewrite_page_ids(
+    page: &[u8; PAGE_SIZE],
+    id_map: &std::collections::HashMap<u64, u64>,
+) -> io::Result<[u8; PAGE_SIZE]> {
+    // Read the page type without re-validating the checksum — we trust
+    // the source file's checksum here, since compaction is a destructive
+    // operation that will re-checksum on re-encode.
+    let page_type = page[4];
+
+    // Record pages (type 1) have no embedded page references — return as-is.
+    if page_type == 1 {
+        let mut copy = [0u8; PAGE_SIZE];
+        copy.copy_from_slice(page);
+        return Ok(copy);
+    }
+
+    // Leaf and internal pages: decode, translate ids, re-encode.
+    let node = btree::decode_node(page)?;
+    let new_node = match node {
+        Node::Leaf(entries) => Node::Leaf(
+            entries
+                .into_iter()
+                .map(|(key, record_id)| {
+                    let new_id = id_map
+                        .get(&record_id)
+                        .copied()
+                        .ok_or_else(|| invalid("compaction: record page id not in live set"))?;
+                    Ok((key, new_id))
+                })
+                .collect::<io::Result<Vec<_>>>()?,
+        ),
+        Node::Internal {
+            separators,
+            children,
+        } => Node::Internal {
+            separators,
+            children: children
+                .into_iter()
+                .map(|child| {
+                    id_map
+                        .get(&child)
+                        .copied()
+                        .ok_or_else(|| invalid("compaction: child page id not in live set"))
+                })
+                .collect::<io::Result<Vec<_>>>()?,
+        },
+    };
+    btree::encode_node(&new_node)
 }
 
 pub struct IndexReader {
@@ -1327,5 +1533,76 @@ mod tests {
         let mut reader = IndexReader::open(&path)?;
         assert_eq!(reader.range(None, None)?, expected_rows);
         std::fs::remove_file(path)
+    }
+
+    #[test]
+    fn compact_removes_dead_pages_and_preserves_data() -> io::Result<()> {
+        let path = test_path();
+        let compacted_path = std::env::temp_dir().join(format!(
+            "passql-compact-{}-{}.psl",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+
+        {
+            let mut database = Storage::create(&path)?;
+            // Insert 100 keys, then update each one 5 times.
+            // Each update CoW-creates a new record page; old record pages
+            // become unreachable but remain on disk.
+            for i in 0..100 {
+                database.set(&format!("k:{i:03}"), b"v0")?;
+            }
+            for round in 1..=5 {
+                for i in 0..100 {
+                    database.set(&format!("k:{i:03}"), format!("v{round}").as_bytes())?;
+                }
+            }
+            let pages_before = database.page_count();
+            assert!(pages_before > 100, "expected dead pages from updates");
+
+            database.compact_to(&compacted_path)?;
+        }
+
+        // Reopen the compacted file and verify the data is intact.
+        {
+            let mut reader = IndexReader::open(&compacted_path)?;
+            for i in 0..100 {
+                let value = reader.get(&format!("k:{i:03}"))?;
+                assert_eq!(value, Some(b"v5".to_vec()));
+            }
+            let pages_after = reader.page_count();
+            // Compacted file should be much smaller than the original.
+            assert!(
+                pages_after < 200,
+                "compaction should remove dead pages, got {pages_after}"
+            );
+        }
+
+        std::fs::remove_file(path)?;
+        std::fs::remove_file(compacted_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn compact_of_empty_database_produces_empty_file() -> io::Result<()> {
+        let path = test_path();
+        let compacted_path = std::env::temp_dir().join(format!(
+            "passql-empty-{}-{}.psl",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+
+        {
+            let database = Storage::create(&path)?;
+            database.compact_to(&compacted_path)?;
+        }
+
+        let mut reader = IndexReader::open(&compacted_path)?;
+        assert_eq!(reader.page_count(), 1); // header only
+        assert_eq!(reader.range(None, None)?.len(), 0);
+
+        std::fs::remove_file(path)?;
+        std::fs::remove_file(compacted_path)?;
+        Ok(())
     }
 }

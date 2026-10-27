@@ -109,6 +109,26 @@ fn run() -> Result<(), Box<dyn Error>> {
             println!("result: structural checks passed");
         }
 
+        Some("compact") => {
+            // passql compact <source.psl> <destination.psl>
+            // Rewrite the source database to destination, removing dead pages
+            // left behind by updates and deletes. The source is not modified.
+            let source = args.get(2).ok_or("missing source database path")?;
+            let dest = args.get(3).ok_or("missing destination database path")?;
+            let database = Storage::open(source)?;
+            let pages_before = database.page_count();
+            let pages_after = database.compact_to(dest)?;
+            println!("compacted: {source} -> {dest}");
+            println!("pages: {pages_before} -> {pages_after}");
+            let saved = pages_before.saturating_sub(pages_after);
+            if saved > 0 {
+                let saved_kb = (saved * passql::PAGE_SIZE as u64) / 1024;
+                println!("reclaimed: {saved} pages ({saved_kb} KB)");
+            } else {
+                println!("(no dead pages to reclaim)");
+            }
+        }
+
         Some("query") => {
             let path = args.get(2).ok_or("missing database path")?;
             let sql = args.get(3).ok_or("missing SQL statement")?;
@@ -240,6 +260,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             println!("  passql range   <file.psl> [start] [end]");
             println!("  passql info    <file.psl>");
             println!("  passql verify  <file.psl>");
+            println!("  passql compact <src.psl> <dst.psl>  # remove dead pages");
             println!();
             println!("  passql query   <file.psl> <sql>     # execute one SQL statement");
             println!("  passql exec    <file.psl> <file.sql> # execute a SQL script");

@@ -1,2 +1,5 @@
 /target
 *.psl
+node/target
+node/*.node
+node/package-lock.json

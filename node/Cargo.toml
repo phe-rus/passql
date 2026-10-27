@@ -1,0 +1,21 @@
+[package]
+name = "passql-node"
+version = "0.1.0"
+edition = "2024"
+description = "Node.js bindings for the Passql embedded database"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+passql = { path = ".." }
+sqlparser = "0.53"
+napi = { version = "2", features = ["napi8", "tokio_rt"] }
+napi-derive = "2"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+lto = true
+opt-level = 3

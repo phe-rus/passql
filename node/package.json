@@ -1,0 +1,20 @@
+{
+  "name": "passql",
+  "version": "0.1.0",
+  "description": "Node.js bindings for the Passql embedded database",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "name": "passql",
+    "packageName": "passql",
+    "triples": {
+      "defaults": true
+    }
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "test": "node test.js"
+  },
+  "license": "MIT OR Apache-2.0"
+}

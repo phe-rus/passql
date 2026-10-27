@@ -30,6 +30,7 @@
 //! ```
 
 pub mod btree;
+pub mod document;
 pub mod format;
 pub mod sql;
 pub mod storage;
@@ -37,6 +38,7 @@ pub mod storage;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use btree::PAGE_SIZE;
+pub use document::{Collection, Filter, Operator as FilterOperator, Path as DocumentPath};
 pub use format::{DatabaseFormat, DatabaseInfo, VerificationReport};
 pub use sql::{ExecutionResult, Row, Value, execute, execute_with_params};
 pub use storage::{IndexReader, Storage, Transaction};

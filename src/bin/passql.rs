@@ -1,3 +1,4 @@
+use passql::document::{Collection, Filter};
 use passql::format;
 use passql::sql::{ExecutionResult, Value};
 use passql::{IndexReader, Storage, VERSION};
@@ -139,6 +140,94 @@ fn run() -> Result<(), Box<dyn Error>> {
             }
         }
 
+        Some("doc") => {
+            // Document collection commands (subcommand-first, like git):
+            //   passql doc create    <file.psl> <coll>
+            //   passql doc insert    <file.psl> <coll> <json>
+            //   passql doc get       <file.psl> <coll> <id>
+            //   passql doc list      <file.psl> <coll>
+            //   passql doc find      <file.psl> <coll> <filter-json>
+            //   passql doc patch     <file.psl> <coll> <id> <path> <json>
+            //   passql doc delete    <file.psl> <coll> <id>
+            //   passql doc drop      <file.psl> <coll>
+            let subcommand = args
+                .get(2)
+                .map(String::as_str)
+                .ok_or("missing doc subcommand")?;
+            let path = args.get(3).ok_or("missing database path")?;
+            let coll_name = args.get(4).ok_or("missing collection name")?;
+            let mut db = open_or_create_storage(path)?;
+            match subcommand {
+                "create" => {
+                    Collection::create(&mut db, coll_name)?;
+                    println!("collection {coll_name} created");
+                }
+                "insert" => {
+                    let json_str = args.get(5).ok_or("missing JSON document")?;
+                    let value: serde_json::Value = serde_json::from_str(json_str)?;
+                    let mut coll = Collection::open(&mut db, coll_name)?;
+                    let id = coll.insert(&value)?;
+                    println!("inserted id {id}");
+                }
+                "get" => {
+                    let id: u64 = args.get(5).ok_or("missing id")?.parse()?;
+                    let mut coll = Collection::open(&mut db, coll_name)?;
+                    match coll.get(id)? {
+                        Some(doc) => println!("{}", serde_json::to_string_pretty(&doc)?),
+                        None => println!("not found"),
+                    }
+                }
+                "list" => {
+                    let mut coll = Collection::open(&mut db, coll_name)?;
+                    for (id, doc) in coll.list()? {
+                        println!("{id}\t{}", serde_json::to_string(&doc)?);
+                    }
+                }
+                "find" => {
+                    let filter_str = args.get(5).ok_or("missing filter JSON")?;
+                    let filter_value: serde_json::Value = serde_json::from_str(filter_str)?;
+                    let filter = Filter::parse(&filter_value)?;
+                    let mut coll = Collection::open(&mut db, coll_name)?;
+                    let matches = coll.find(&filter)?;
+                    println!("({} matches)", matches.len());
+                    for (id, doc) in matches {
+                        println!("{id}\t{}", serde_json::to_string(&doc)?);
+                    }
+                }
+                "patch" => {
+                    let id: u64 = args.get(5).ok_or("missing id")?.parse()?;
+                    let path_str = args.get(6).ok_or("missing path")?;
+                    let json_str = args.get(7).ok_or("missing value JSON")?;
+                    let value: serde_json::Value = serde_json::from_str(json_str)?;
+                    let mut coll = Collection::open(&mut db, coll_name)?;
+                    match coll.patch(id, &[(passql::DocumentPath::parse(path_str), value)])? {
+                        Some(updated) => println!("{}", serde_json::to_string_pretty(&updated)?),
+                        None => println!("not found"),
+                    }
+                }
+                "delete" => {
+                    let id: u64 = args.get(5).ok_or("missing id")?.parse()?;
+                    let mut coll = Collection::open(&mut db, coll_name)?;
+                    if coll.delete(id)? {
+                        println!("deleted id {id}");
+                    } else {
+                        println!("not found");
+                    }
+                }
+                "drop" => {
+                    let mut coll = Collection::open(&mut db, coll_name)?;
+                    if coll.drop_collection()? {
+                        println!("collection {coll_name} dropped");
+                    } else {
+                        println!("collection {coll_name} not found");
+                    }
+                }
+                other => {
+                    return Err(format!("unknown doc subcommand: {other}").into());
+                }
+            }
+        }
+
         _ => {
             println!("Passql v{VERSION}");
             println!("embedded, edge-native database engine\n");
@@ -155,8 +244,17 @@ fn run() -> Result<(), Box<dyn Error>> {
             println!("  passql query   <file.psl> <sql>     # execute one SQL statement");
             println!("  passql exec    <file.psl> <file.sql> # execute a SQL script");
             println!();
+            println!("  passql doc create <file.psl> <coll>                  # create collection");
+            println!("  passql doc insert <file.psl> <coll> <json>           # insert document");
+            println!("  passql doc get    <file.psl> <coll> <id>             # fetch by id");
+            println!("  passql doc list   <file.psl> <coll>                 # list all");
+            println!("  passql doc find   <file.psl> <coll> <filter-json>    # find by filter");
+            println!("  passql doc patch  <file.psl> <coll> <id> <path> <v>  # patch field");
+            println!("  passql doc delete <file.psl> <coll> <id>             # delete by id");
+            println!("  passql doc drop   <file.psl> <coll>                  # drop collection");
+            println!();
             println!("upcoming:");
-            println!("  passql doc     <file.psl> <collection> ...  # stage 3 — documents");
+            println!("  passql serve   # stage 5 — wire protocol server");
         }
     }
 
@@ -208,5 +306,16 @@ fn format_value(value: &Value) -> String {
         Value::Real(f) => f.to_string(),
         Value::Text(s) => s.clone(),
         Value::Blob(bytes) => format!("blob[{}]", bytes.len()),
+    }
+}
+
+/// Open an existing Passql database, or create one if it does not exist.
+/// Used by the `doc` subcommand so users don't have to `passql create`
+/// before their first document operation.
+fn open_or_create_storage(path: &str) -> Result<Storage, Box<dyn Error>> {
+    if std::path::Path::new(path).exists() {
+        Ok(Storage::open(path)?)
+    } else {
+        Ok(Storage::create(path)?)
     }
 }
